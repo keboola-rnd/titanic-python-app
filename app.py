@@ -91,10 +91,53 @@ def _port_col(df):
     return "Boarded" if "Boarded" in df.columns else "Embarked"
 
 # ── Runtime info ─────────────────────────────────────────────────────────────
-def _discover_run_info():
-    """Discover Data Science API URL + app ID from Keboola auto-injected env vars."""
+def _read_config_json() -> dict | None:
+    """Read the full /data/config.json if it exists."""
+    config_path = os.path.join(DATA_DIR, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _kbc_env() -> dict[str, str]:
+    """Collect KBC_* environment variables (mask token)."""
+    out = {}
+    for k, v in sorted(os.environ.items()):
+        if k.startswith("KBC_"):
+            out[k] = (v[:8] + "…") if "TOKEN" in k and len(v) > 8 else v
+    return out
+
+# ── API routes ────────────────────────────────────────────────────────────────
+
+@app.get("/api/run-info")
+def run_info():
+    diag: dict = {"backend": None, "steps": {}}
+    env = _kbc_env()
+    diag["env"] = env
+
+    # ── Method 1: read from /data/config.json ──
+    cfg = _read_config_json()
+    config_path = os.path.join(DATA_DIR, "config.json")
+    if cfg is not None:
+        diag["steps"]["config_json"] = "found"
+        diag["steps"]["config_json_keys"] = list(cfg.keys())
+        runtime = cfg.get("runtime")
+        if runtime:
+            diag["steps"]["runtime"] = runtime
+            backend_type = runtime.get("backend", {}).get("type")
+            if backend_type:
+                diag["backend"] = backend_type
+                return diag
+        else:
+            diag["steps"]["runtime"] = "missing from config.json"
+    else:
+        diag["steps"]["config_json"] = f"not found at {config_path}"
+
+    # ── Method 2: Data Science API via service discovery ──
     if not KBC_URL or not KBC_TOKEN:
-        return None, None
+        diag["steps"]["api_discovery"] = f"skipped (KBC_URL={'set' if KBC_URL else 'empty'}, KBC_TOKEN={'set' if KBC_TOKEN else 'empty'})"
+        return diag
 
     storage_root = KBC_URL.rstrip("/") + "/v2/storage"
     headers = {"X-StorageApi-Token": KBC_TOKEN}
@@ -104,54 +147,57 @@ def _discover_run_info():
         with urllib.request.urlopen(req, timeout=5) as r:
             return json.loads(r.read())
 
-    # 1. Find Data Science API URL via stack service discovery
+    # 2a. Find Data Science API URL
     ds_url = None
     try:
-        for svc in _get(storage_root).get("services", []):
+        svc_resp = _get(storage_root)
+        services = svc_resp.get("services", [])
+        diag["steps"]["services_found"] = [s.get("id") for s in services]
+        for svc in services:
             if svc.get("id") == "data-science":
                 ds_url = svc["url"].rstrip("/")
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        diag["steps"]["service_discovery_error"] = str(e)
 
     if not ds_url:
-        return None, None
+        diag["steps"]["ds_url"] = "not found"
+        return diag
+    diag["steps"]["ds_url"] = ds_url
 
-    # 2. Resolve app ID: env override -> lookup via config
+    # 2b. Resolve app ID
     app_id = KBC_SANDBOX_ID
+    diag["steps"]["KBC_SANDBOX_ID"] = app_id or "empty"
     if not app_id and KBC_CONFIGID:
         try:
-            cfg = _get(f"{storage_root}/components/keboola.data-apps/configs/{KBC_CONFIGID}")
-            app_id = cfg.get("configuration", {}).get("parameters", {}).get("id")
-        except Exception:
-            pass
+            cfg_resp = _get(f"{storage_root}/components/keboola.data-apps/configs/{KBC_CONFIGID}")
+            app_id = cfg_resp.get("configuration", {}).get("parameters", {}).get("id")
+            diag["steps"]["config_lookup"] = {"configId": KBC_CONFIGID, "resolved_app_id": app_id}
+        except Exception as e:
+            diag["steps"]["config_lookup_error"] = str(e)
 
-    return ds_url, app_id
+    if not app_id:
+        diag["steps"]["app_id"] = "could not resolve"
+        return diag
+    diag["steps"]["app_id"] = app_id
 
-def _kbc_env() -> dict[str, str]:
-    """Collect KBC_* environment variables for debugging."""
-    return {k: v for k, v in sorted(os.environ.items()) if k.startswith("KBC_")}
-
-# ── API routes ────────────────────────────────────────────────────────────────
-
-@app.get("/api/run-info")
-def run_info():
-    ds_url, app_id = _discover_run_info()
-    env = _kbc_env()
-    if not ds_url or not app_id:
-        return {"backend": None, "env": env}
+    # 2c. Call Data Science API
     try:
-        req = urllib.request.Request(
-            f"{ds_url}/apps/{app_id}/runs",
-            headers={"X-StorageApi-Token": KBC_TOKEN},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            runs = json.loads(resp.read())
+        runs_url = f"{ds_url}/apps/{app_id}/runs"
+        diag["steps"]["runs_url"] = runs_url
+        runs = _get(runs_url)
         if runs and isinstance(runs, list):
-            return {"backend": runs[0].get("runtimeSize"), "env": env}
+            first_run = runs[0]
+            diag["steps"]["first_run_keys"] = list(first_run.keys())
+            diag["backend"] = first_run.get("runtimeBackendType") or first_run.get("runtimeSize")
+            diag["steps"]["runtimeBackendType"] = first_run.get("runtimeBackendType")
+            diag["steps"]["runtimeSize"] = first_run.get("runtimeSize")
+        else:
+            diag["steps"]["runs_response"] = "empty or not a list"
     except Exception as e:
-        return {"backend": None, "error": str(e), "env": env}
-    return {"backend": None, "env": env}
+        diag["steps"]["runs_error"] = str(e)
+
+    return diag
 
 @app.get("/api/health")
 def health():
