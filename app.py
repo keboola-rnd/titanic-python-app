@@ -116,25 +116,32 @@ def run_info():
     env = _kbc_env()
     diag["env"] = env
 
-    # ── Method 1: read from /data/config.json ──
+    # ── Step 1: read /data/config.json ──
     cfg = _read_config_json()
     config_path = os.path.join(DATA_DIR, "config.json")
     if cfg is not None:
         diag["steps"]["config_json"] = "found"
-        diag["steps"]["config_json_keys"] = list(cfg.keys())
+        diag["steps"]["config_json_content"] = cfg  # dump full content for debugging
+        # Try runtime.backend.type
         runtime = cfg.get("runtime")
         if runtime:
-            diag["steps"]["runtime"] = runtime
             backend_type = runtime.get("backend", {}).get("type")
             if backend_type:
                 diag["backend"] = backend_type
                 return diag
-        else:
-            diag["steps"]["runtime"] = "missing from config.json"
+        # Try to extract app ID from config.json for API fallback
+        app_id_from_cfg = (
+            cfg.get("id")
+            or cfg.get("parameters", {}).get("id") if isinstance(cfg.get("parameters"), dict) else None
+        )
+        if not app_id_from_cfg and isinstance(cfg.get("dataApp"), dict):
+            app_id_from_cfg = cfg["dataApp"].get("id")
+        diag["steps"]["app_id_from_config"] = app_id_from_cfg or "not found"
     else:
         diag["steps"]["config_json"] = f"not found at {config_path}"
+        app_id_from_cfg = None
 
-    # ── Method 2: Data Science API via service discovery ──
+    # ── Step 2: Data Science API via service discovery ──
     if not KBC_URL or not KBC_TOKEN:
         diag["steps"]["api_discovery"] = f"skipped (KBC_URL={'set' if KBC_URL else 'empty'}, KBC_TOKEN={'set' if KBC_TOKEN else 'empty'})"
         return diag
@@ -165,9 +172,10 @@ def run_info():
         return diag
     diag["steps"]["ds_url"] = ds_url
 
-    # 2b. Resolve app ID
-    app_id = KBC_SANDBOX_ID
-    diag["steps"]["KBC_SANDBOX_ID"] = app_id or "empty"
+    # 2b. Resolve app ID: env override > config.json > API config lookup
+    app_id = KBC_SANDBOX_ID or str(app_id_from_cfg) if app_id_from_cfg else KBC_SANDBOX_ID
+    diag["steps"]["KBC_SANDBOX_ID"] = KBC_SANDBOX_ID or "empty"
+    diag["steps"]["app_id_from_config"] = str(app_id_from_cfg) if app_id_from_cfg else "empty"
     if not app_id and KBC_CONFIGID:
         try:
             cfg_resp = _get(f"{storage_root}/components/keboola.data-apps/configs/{KBC_CONFIGID}")
