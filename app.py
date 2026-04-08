@@ -77,8 +77,13 @@ def health():
 
 @app.get("/api/run-info")
 def run_info():
-    if not SANDBOXES_API_URL or not KBC_SANDBOX_ID or not KBC_TOKEN:
-        return {"backend": None}
+    missing = [v for v, val in [
+        ("SANDBOXES_API_URL", SANDBOXES_API_URL),
+        ("KBC_SANDBOX_ID",    KBC_SANDBOX_ID),
+        ("KBC_TOKEN",         KBC_TOKEN),
+    ] if not val]
+    if missing:
+        return {"backend": None, "missing": missing}
     try:
         req = urllib.request.Request(
             f"{SANDBOXES_API_URL}/apps/{KBC_SANDBOX_ID}/runs",
@@ -88,8 +93,8 @@ def run_info():
             runs = json.loads(resp.read())
         if runs and isinstance(runs, list):
             return {"backend": runs[0].get("runtimeBackendType")}
-    except Exception:
-        pass
+    except Exception as e:
+        return {"backend": None, "error": str(e)}
     return {"backend": None}
 
 @app.get("/api/stats")
@@ -479,7 +484,7 @@ document.getElementById('search').addEventListener('input',e=>{clearTimeout(st2)
       api('/api/by-port'),api('/api/by-age-group'),api('/api/heatmap?n=200')]);
     const k=stats;
     document.getElementById('hdr-badge').textContent=`Southampton → New York · ${k.total.toLocaleString()} passengers`;
-    api('/api/run-info').then(info=>{if(info&&info.backend){const el=document.getElementById('hdr-backend');el.textContent=`Backend · ${info.backend}`;el.style.display='inline-block'}}).catch(()=>{});
+    api('/api/run-info').then(info=>{const el=document.getElementById('hdr-backend');if(info&&info.backend){el.textContent=`Backend · ${info.backend}`}else if(info&&info.missing){el.textContent=`⚠ Missing env: ${info.missing.join(', ')}`;el.style.borderColor='var(--red)';el.style.color='var(--red)'}else if(info&&info.error){el.textContent=`⚠ run-info error: ${info.error}`;el.style.borderColor='var(--red)';el.style.color='var(--red)'}else{return}el.style.display='inline-block'}).catch(()=>{});
     const kd=[
       {i:'👥',v:k.total,l:'Total Records',a:'#e05c5c',f:v=>Math.round(v).toLocaleString()},
       {i:'🛥️',v:k.survivors,l:'Survivors',sb:`${k.surv_rate}% rate`,a:'#00d4b4',f:v=>Math.round(v).toLocaleString()},
