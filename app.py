@@ -111,39 +111,34 @@ def _kbc_env() -> dict[str, str]:
 # ── API routes ────────────────────────────────────────────────────────────────
 
 @app.get("/api/run-info")
-def run_info():
+def run_info(app_id: str = Query("", description="Manual app ID override")):
     diag: dict = {"backend": None, "steps": {}}
-    env = _kbc_env()
-    diag["env"] = env
+    diag["env"] = _kbc_env()
 
     # ── Step 1: read /data/config.json ──
     cfg = _read_config_json()
     config_path = os.path.join(DATA_DIR, "config.json")
+    slug = None
     if cfg is not None:
         diag["steps"]["config_json"] = "found"
-        diag["steps"]["config_json_content"] = cfg  # dump full content for debugging
-        # Try runtime.backend.type
+        diag["steps"]["config_json_keys"] = list(cfg.keys())
+        # Try runtime.backend.type (direct answer, no API needed)
         runtime = cfg.get("runtime")
         if runtime:
             backend_type = runtime.get("backend", {}).get("type")
             if backend_type:
                 diag["backend"] = backend_type
                 return diag
-        # Try to extract app ID from config.json for API fallback
-        app_id_from_cfg = (
-            cfg.get("id")
-            or cfg.get("parameters", {}).get("id") if isinstance(cfg.get("parameters"), dict) else None
-        )
-        if not app_id_from_cfg and isinstance(cfg.get("dataApp"), dict):
-            app_id_from_cfg = cfg["dataApp"].get("id")
-        diag["steps"]["app_id_from_config"] = app_id_from_cfg or "not found"
+        # Extract slug for auto-discovery
+        data_app = cfg.get("dataApp", {})
+        slug = data_app.get("slug") if isinstance(data_app, dict) else None
+        diag["steps"]["slug"] = slug or "not found"
     else:
         diag["steps"]["config_json"] = f"not found at {config_path}"
-        app_id_from_cfg = None
 
-    # ── Step 2: Data Science API via service discovery ──
+    # ── Step 2: Data Science API ──
     if not KBC_URL or not KBC_TOKEN:
-        diag["steps"]["api_discovery"] = f"skipped (KBC_URL={'set' if KBC_URL else 'empty'}, KBC_TOKEN={'set' if KBC_TOKEN else 'empty'})"
+        diag["steps"]["api"] = f"skipped (KBC_URL={'set' if KBC_URL else 'empty'}, KBC_TOKEN={'set' if KBC_TOKEN else 'empty'})"
         return diag
 
     storage_root = KBC_URL.rstrip("/") + "/v2/storage"
@@ -159,39 +154,46 @@ def run_info():
     try:
         svc_resp = _get(storage_root)
         services = svc_resp.get("services", [])
-        diag["steps"]["services_found"] = [s.get("id") for s in services]
         for svc in services:
             if svc.get("id") == "data-science":
                 ds_url = svc["url"].rstrip("/")
                 break
     except Exception as e:
         diag["steps"]["service_discovery_error"] = str(e)
-
     if not ds_url:
         diag["steps"]["ds_url"] = "not found"
         return diag
     diag["steps"]["ds_url"] = ds_url
 
-    # 2b. Resolve app ID: env override > config.json > API config lookup
-    app_id = KBC_SANDBOX_ID or str(app_id_from_cfg) if app_id_from_cfg else KBC_SANDBOX_ID
-    diag["steps"]["KBC_SANDBOX_ID"] = KBC_SANDBOX_ID or "empty"
-    diag["steps"]["app_id_from_config"] = str(app_id_from_cfg) if app_id_from_cfg else "empty"
-    if not app_id and KBC_CONFIGID:
+    # 2b. Resolve app ID: manual override > env > slug auto-discovery
+    resolved_id = app_id or KBC_SANDBOX_ID
+    diag["steps"]["app_id_source"] = "manual" if app_id else ("env" if KBC_SANDBOX_ID else "none")
+
+    # Try slug-based auto-discovery via listing apps
+    if not resolved_id and slug:
         try:
-            cfg_resp = _get(f"{storage_root}/components/keboola.data-apps/configs/{KBC_CONFIGID}")
-            app_id = cfg_resp.get("configuration", {}).get("parameters", {}).get("id")
-            diag["steps"]["config_lookup"] = {"configId": KBC_CONFIGID, "resolved_app_id": app_id}
+            apps = _get(f"{ds_url}/apps")
+            if isinstance(apps, list):
+                diag["steps"]["apps_count"] = len(apps)
+                for a in apps:
+                    if a.get("slug") == slug:
+                        resolved_id = str(a.get("id", ""))
+                        diag["steps"]["slug_match"] = {"slug": slug, "id": resolved_id}
+                        break
+                if not resolved_id:
+                    # dump first few app slugs for debugging
+                    diag["steps"]["available_slugs"] = [a.get("slug") for a in apps[:20]]
         except Exception as e:
-            diag["steps"]["config_lookup_error"] = str(e)
+            diag["steps"]["apps_list_error"] = str(e)
 
-    if not app_id:
-        diag["steps"]["app_id"] = "could not resolve"
+    if not resolved_id:
+        diag["steps"]["app_id"] = "could not resolve — use ?app_id=YOUR_ID"
         return diag
-    diag["steps"]["app_id"] = app_id
+    diag["steps"]["app_id"] = resolved_id
 
-    # 2c. Call Data Science API
+    # 2c. Call Data Science API /apps/{id}/runs
     try:
-        runs_url = f"{ds_url}/apps/{app_id}/runs"
+        runs_url = f"{ds_url}/apps/{resolved_id}/runs"
         diag["steps"]["runs_url"] = runs_url
         runs = _get(runs_url)
         if runs and isinstance(runs, list):
@@ -421,6 +423,10 @@ footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:3rem;pad
   <h1>RMS TITANIC</h1><p class="subtitle">Voyage Dashboard · April 1912</p>
   <div class="date-badge" id="hdr-badge">Loading…</div>
   <div class="date-badge" id="hdr-backend" style="display:none;margin-top:.5rem"></div>
+  <div id="backend-input" style="display:none;margin-top:.75rem">
+    <input id="app-id-input" type="text" placeholder="Enter App ID (e.g. 287911)" style="background:var(--deep);border:1px solid var(--border);border-radius:6px;padding:.4rem .8rem;color:var(--text);font-size:.78rem;width:200px;outline:none"/>
+    <button id="app-id-btn" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:.4rem .8rem;font-size:.78rem;cursor:pointer;margin-left:.3rem">Detect backend</button>
+  </div>
 </header>
 <div class="kpi-grid" id="kpi-grid">
   <div class="kpi skeleton" style="--accent:#e05c5c"></div><div class="kpi skeleton" style="--accent:#00d4b4"></div>
@@ -601,7 +607,10 @@ document.getElementById('search').addEventListener('input',e=>{clearTimeout(st2)
       api('/api/by-port'),api('/api/by-age-group'),api('/api/heatmap?n=200')]);
     const k=stats;
     document.getElementById('hdr-badge').textContent=`Southampton → New York · ${k.total.toLocaleString()} passengers`;
-    api('/api/run-info').then(info=>{const el=document.getElementById('hdr-backend');if(info&&info.backend){el.textContent=`Backend · ${info.backend}`;el.style.borderColor='var(--teal)';el.style.color='var(--teal)'}else{el.textContent='Backend · unknown';el.style.borderColor='var(--muted)';el.style.color='var(--muted)'}el.style.display='inline-block'}).catch(()=>{});
+    function showBackend(info){const el=document.getElementById('hdr-backend');const inp=document.getElementById('backend-input');if(info&&info.backend){el.textContent='Backend · '+info.backend;el.style.borderColor='var(--teal)';el.style.color='var(--teal)';el.style.display='inline-block';inp.style.display='none'}else{el.textContent='Backend · unknown';el.style.borderColor='var(--muted)';el.style.color='var(--muted)';el.style.display='inline-block';inp.style.display='block'}}
+    api('/api/run-info').then(showBackend).catch(()=>{document.getElementById('backend-input').style.display='block'});
+    document.getElementById('app-id-btn').addEventListener('click',()=>{const v=document.getElementById('app-id-input').value.trim();if(!v)return;const btn=document.getElementById('app-id-btn');btn.textContent='Loading…';btn.disabled=true;api('/api/run-info?app_id='+encodeURIComponent(v)).then(info=>{showBackend(info);btn.textContent='Detect backend';btn.disabled=false}).catch(()=>{btn.textContent='Detect backend';btn.disabled=false})});
+    document.getElementById('app-id-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('app-id-btn').click()});
     const kd=[
       {i:'👥',v:k.total,l:'Total Records',a:'#e05c5c',f:v=>Math.round(v).toLocaleString()},
       {i:'🛥️',v:k.survivors,l:'Survivors',sb:`${k.surv_rate}% rate`,a:'#00d4b4',f:v=>Math.round(v).toLocaleString()},
