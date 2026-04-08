@@ -3,14 +3,18 @@ Titanic Data App — FastAPI backend + self-contained JS frontend.
 Keboola entrypoint (set in pyproject.toml):
     uvicorn app:app --host 0.0.0.0 --port 8080
 """
-import os, math, json
+import os, math, json, urllib.request, urllib.error
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_DIR = os.environ.get("KBC_DATADIR", "/data/")
+DATA_DIR          = os.environ.get("KBC_DATADIR",        "/data/")
+KBC_TOKEN         = os.environ.get("KBC_TOKEN",          "")
+TABLE_ID          = os.environ.get("KBC_TABLE_ID",       "")
+SANDBOXES_API_URL = os.environ.get("SANDBOXES_API_URL",  "")
+KBC_SANDBOX_ID    = os.environ.get("KBC_SANDBOX_ID",     "")
 
 app = FastAPI(title="Titanic Data App")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -70,6 +74,23 @@ def health():
         return {"status": "error", "error": str(e),
                 "kbc_token_set": bool(KBC_TOKEN),
                 "table_id": TABLE_ID or "(not set)"}
+
+@app.get("/api/run-info")
+def run_info():
+    if not SANDBOXES_API_URL or not KBC_SANDBOX_ID or not KBC_TOKEN:
+        return {"backend": None}
+    try:
+        req = urllib.request.Request(
+            f"{SANDBOXES_API_URL}/apps/{KBC_SANDBOX_ID}/runs",
+            headers={"X-StorageApi-Token": KBC_TOKEN},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            runs = json.loads(resp.read())
+        if runs and isinstance(runs, list):
+            return {"backend": runs[0].get("runtimeBackendType")}
+    except Exception:
+        pass
+    return {"backend": None}
 
 @app.get("/api/stats")
 def stats():
@@ -277,6 +298,7 @@ footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:3rem;pad
   <div class="ship-line"><div class="hline"></div><span class="anchor">⚓</span><div class="hline"></div></div>
   <h1>RMS TITANIC</h1><p class="subtitle">Voyage Dashboard · April 1912</p>
   <div class="date-badge" id="hdr-badge">Loading…</div>
+  <div class="date-badge" id="hdr-backend" style="display:none;margin-top:.5rem"></div>
 </header>
 <div class="kpi-grid" id="kpi-grid">
   <div class="kpi skeleton" style="--accent:#e05c5c"></div><div class="kpi skeleton" style="--accent:#00d4b4"></div>
@@ -457,6 +479,7 @@ document.getElementById('search').addEventListener('input',e=>{clearTimeout(st2)
       api('/api/by-port'),api('/api/by-age-group'),api('/api/heatmap?n=200')]);
     const k=stats;
     document.getElementById('hdr-badge').textContent=`Southampton → New York · ${k.total.toLocaleString()} passengers`;
+    api('/api/run-info').then(info=>{if(info&&info.backend){const el=document.getElementById('hdr-backend');el.textContent=`Backend · ${info.backend}`;el.style.display='inline-block'}}).catch(()=>{});
     const kd=[
       {i:'👥',v:k.total,l:'Total Records',a:'#e05c5c',f:v=>Math.round(v).toLocaleString()},
       {i:'🛥️',v:k.survivors,l:'Survivors',sb:`${k.surv_rate}% rate`,a:'#00d4b4',f:v=>Math.round(v).toLocaleString()},
