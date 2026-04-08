@@ -3,14 +3,18 @@ Titanic Data App — FastAPI backend + self-contained JS frontend.
 Keboola entrypoint (set in pyproject.toml):
     uvicorn app:app --host 0.0.0.0 --port 8080
 """
-import os, math, json
+import os, math, json, urllib.request
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_DIR = os.environ.get("KBC_DATADIR", "/data/")
+DATA_DIR        = os.environ.get("KBC_DATADIR",    "/data/")
+KBC_TOKEN       = os.environ.get("KBC_TOKEN",       "")
+KBC_URL         = os.environ.get("KBC_URL",         "")   # auto-injected by Keboola
+KBC_CONFIGID    = os.environ.get("KBC_CONFIGID",    "")   # auto-injected by Keboola
+KBC_SANDBOX_ID  = os.environ.get("KBC_SANDBOX_ID",  "")   # manual override fallback
 
 app = FastAPI(title="Titanic Data App")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -32,7 +36,33 @@ def _load() -> pd.DataFrame:
                        if f.endswith(".csv")) if os.path.isdir(tables_dir) else []
     if csv_files:
         return _clean(pd.read_csv(csv_files[0]))
-    raise FileNotFoundError(f"No CSV found in {tables_dir}")
+    return _clean(_sample_data())
+
+def _sample_data() -> pd.DataFrame:
+    """Built-in sample passengers for local dev / demo when no CSV is mounted."""
+    rows = [
+        {"PassengerId":1,"Survived":0,"Pclass":3,"Name":"Braund, Mr. Owen Harris","Sex":"male","Age":22,"SibSp":1,"Parch":0,"Fare":7.25,"Embarked":"S"},
+        {"PassengerId":2,"Survived":1,"Pclass":1,"Name":"Cumings, Mrs. John Bradley","Sex":"female","Age":38,"SibSp":1,"Parch":0,"Fare":71.28,"Embarked":"C"},
+        {"PassengerId":3,"Survived":1,"Pclass":3,"Name":"Heikkinen, Miss. Laina","Sex":"female","Age":26,"SibSp":0,"Parch":0,"Fare":7.93,"Embarked":"S"},
+        {"PassengerId":4,"Survived":1,"Pclass":1,"Name":"Futrelle, Mrs. Jacques Heath","Sex":"female","Age":35,"SibSp":1,"Parch":0,"Fare":53.10,"Embarked":"S"},
+        {"PassengerId":5,"Survived":0,"Pclass":3,"Name":"Allen, Mr. William Henry","Sex":"male","Age":35,"SibSp":0,"Parch":0,"Fare":8.05,"Embarked":"S"},
+        {"PassengerId":6,"Survived":0,"Pclass":3,"Name":"Moran, Mr. James","Sex":"male","Age":None,"SibSp":0,"Parch":0,"Fare":8.46,"Embarked":"Q"},
+        {"PassengerId":7,"Survived":0,"Pclass":1,"Name":"McCarthy, Mr. Timothy J","Sex":"male","Age":54,"SibSp":0,"Parch":0,"Fare":51.86,"Embarked":"S"},
+        {"PassengerId":8,"Survived":0,"Pclass":3,"Name":"Palsson, Master. Gosta Leonard","Sex":"male","Age":2,"SibSp":3,"Parch":1,"Fare":21.08,"Embarked":"S"},
+        {"PassengerId":9,"Survived":1,"Pclass":3,"Name":"Johnson, Mrs. Oscar W","Sex":"female","Age":27,"SibSp":0,"Parch":2,"Fare":11.13,"Embarked":"S"},
+        {"PassengerId":10,"Survived":1,"Pclass":2,"Name":"Nasser, Mrs. Nicholas","Sex":"female","Age":14,"SibSp":1,"Parch":0,"Fare":30.07,"Embarked":"C"},
+        {"PassengerId":11,"Survived":1,"Pclass":3,"Name":"Sandstrom, Miss. Marguerite Rut","Sex":"female","Age":4,"SibSp":1,"Parch":1,"Fare":16.70,"Embarked":"S"},
+        {"PassengerId":12,"Survived":1,"Pclass":1,"Name":"Bonnell, Miss. Elizabeth","Sex":"female","Age":58,"SibSp":0,"Parch":0,"Fare":26.55,"Embarked":"S"},
+        {"PassengerId":13,"Survived":0,"Pclass":3,"Name":"Saundercock, Mr. William Henry","Sex":"male","Age":20,"SibSp":0,"Parch":0,"Fare":8.05,"Embarked":"S"},
+        {"PassengerId":14,"Survived":0,"Pclass":3,"Name":"Andersson, Mr. Anders Johan","Sex":"male","Age":39,"SibSp":1,"Parch":5,"Fare":31.28,"Embarked":"S"},
+        {"PassengerId":15,"Survived":0,"Pclass":3,"Name":"Vestrom, Miss. Hulda Amanda A","Sex":"female","Age":14,"SibSp":0,"Parch":0,"Fare":7.85,"Embarked":"S"},
+        {"PassengerId":16,"Survived":1,"Pclass":2,"Name":"Hewlett, Mrs. (Mary D Kingcome)","Sex":"female","Age":55,"SibSp":0,"Parch":0,"Fare":16.00,"Embarked":"S"},
+        {"PassengerId":17,"Survived":0,"Pclass":3,"Name":"Rice, Master. Eugene","Sex":"male","Age":2,"SibSp":4,"Parch":1,"Fare":29.13,"Embarked":"Q"},
+        {"PassengerId":18,"Survived":1,"Pclass":2,"Name":"Williams, Mr. Charles Eugene","Sex":"male","Age":None,"SibSp":0,"Parch":0,"Fare":13.00,"Embarked":"S"},
+        {"PassengerId":19,"Survived":0,"Pclass":3,"Name":"Vander Planke, Mrs. Julius","Sex":"female","Age":31,"SibSp":1,"Parch":0,"Fare":18.00,"Embarked":"S"},
+        {"PassengerId":20,"Survived":1,"Pclass":3,"Name":"Masselmani, Mrs. Fatima","Sex":"female","Age":None,"SibSp":0,"Parch":0,"Fare":7.23,"Embarked":"C"},
+    ]
+    return pd.DataFrame(rows)
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["PassengerId","Survived","Pclass","Age","SibSp","Parch","Fare","Age_wiki"]:
@@ -61,15 +91,42 @@ def _port_col(df):
     return "Boarded" if "Boarded" in df.columns else "Embarked"
 
 # ── Runtime info ─────────────────────────────────────────────────────────────
-def _read_backend_type() -> str | None:
-    """Read runtime.backend.type from the Keboola-mounted config.json."""
-    config_path = os.path.join(DATA_DIR, "config.json")
+def _discover_run_info():
+    """Discover Data Science API URL + app ID from Keboola auto-injected env vars."""
+    if not KBC_URL or not KBC_TOKEN:
+        return None, None
+
+    storage_root = KBC_URL.rstrip("/") + "/v2/storage"
+    headers = {"X-StorageApi-Token": KBC_TOKEN}
+
+    def _get(url):
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+
+    # 1. Find Data Science API URL via stack service discovery
+    ds_url = None
     try:
-        with open(config_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg.get("runtime", {}).get("backend", {}).get("type")
+        for svc in _get(storage_root).get("services", []):
+            if svc.get("id") == "data-science":
+                ds_url = svc["url"].rstrip("/")
+                break
     except Exception:
-        return None
+        pass
+
+    if not ds_url:
+        return None, None
+
+    # 2. Resolve app ID: env override -> lookup via config
+    app_id = KBC_SANDBOX_ID
+    if not app_id and KBC_CONFIGID:
+        try:
+            cfg = _get(f"{storage_root}/components/keboola.data-apps/configs/{KBC_CONFIGID}")
+            app_id = cfg.get("configuration", {}).get("parameters", {}).get("id")
+        except Exception:
+            pass
+
+    return ds_url, app_id
 
 def _kbc_env() -> dict[str, str]:
     """Collect KBC_* environment variables for debugging."""
@@ -79,12 +136,22 @@ def _kbc_env() -> dict[str, str]:
 
 @app.get("/api/run-info")
 def run_info():
-    backend = _read_backend_type()
+    ds_url, app_id = _discover_run_info()
     env = _kbc_env()
-    return {
-        "backend": backend,
-        "env": env,
-    }
+    if not ds_url or not app_id:
+        return {"backend": None, "env": env}
+    try:
+        req = urllib.request.Request(
+            f"{ds_url}/apps/{app_id}/runs",
+            headers={"X-StorageApi-Token": KBC_TOKEN},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            runs = json.loads(resp.read())
+        if runs and isinstance(runs, list):
+            return {"backend": runs[0].get("runtimeSize"), "env": env}
+    except Exception as e:
+        return {"backend": None, "error": str(e), "env": env}
+    return {"backend": None, "env": env}
 
 @app.get("/api/health")
 def health():
