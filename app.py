@@ -60,16 +60,38 @@ def _nan(v):
 def _port_col(df):
     return "Boarded" if "Boarded" in df.columns else "Embarked"
 
+# ── Runtime info ─────────────────────────────────────────────────────────────
+def _read_backend_type() -> str | None:
+    """Read runtime.backend.type from the Keboola-mounted config.json."""
+    config_path = os.path.join(DATA_DIR, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("runtime", {}).get("backend", {}).get("type")
+    except Exception:
+        return None
+
+def _kbc_env() -> dict[str, str]:
+    """Collect KBC_* environment variables for debugging."""
+    return {k: v for k, v in sorted(os.environ.items()) if k.startswith("KBC_")}
+
 # ── API routes ────────────────────────────────────────────────────────────────
+
+@app.get("/api/run-info")
+def run_info():
+    backend = _read_backend_type()
+    env = _kbc_env()
+    return {
+        "backend": backend,
+        "env": env,
+    }
 
 @app.get("/api/health")
 def health():
     try:
         return {"status": "ok", "rows": len(get_df())}
     except Exception as e:
-        return {"status": "error", "error": str(e),
-                "kbc_token_set": bool(KBC_TOKEN),
-                "table_id": TABLE_ID or "(not set)"}
+        return {"status": "error", "error": str(e)}
 
 @app.get("/api/stats")
 def stats():
@@ -277,6 +299,7 @@ footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:3rem;pad
   <div class="ship-line"><div class="hline"></div><span class="anchor">⚓</span><div class="hline"></div></div>
   <h1>RMS TITANIC</h1><p class="subtitle">Voyage Dashboard · April 1912</p>
   <div class="date-badge" id="hdr-badge">Loading…</div>
+  <div class="date-badge" id="hdr-backend" style="display:none;margin-top:.5rem"></div>
 </header>
 <div class="kpi-grid" id="kpi-grid">
   <div class="kpi skeleton" style="--accent:#e05c5c"></div><div class="kpi skeleton" style="--accent:#00d4b4"></div>
@@ -457,6 +480,7 @@ document.getElementById('search').addEventListener('input',e=>{clearTimeout(st2)
       api('/api/by-port'),api('/api/by-age-group'),api('/api/heatmap?n=200')]);
     const k=stats;
     document.getElementById('hdr-badge').textContent=`Southampton → New York · ${k.total.toLocaleString()} passengers`;
+    api('/api/run-info').then(info=>{const el=document.getElementById('hdr-backend');if(info&&info.backend){el.textContent=`Backend · ${info.backend}`;el.style.borderColor='var(--teal)';el.style.color='var(--teal)'}else{el.textContent='Backend · unknown';el.style.borderColor='var(--muted)';el.style.color='var(--muted)'}el.style.display='inline-block'}).catch(()=>{});
     const kd=[
       {i:'👥',v:k.total,l:'Total Records',a:'#e05c5c',f:v=>Math.round(v).toLocaleString()},
       {i:'🛥️',v:k.survivors,l:'Survivors',sb:`${k.surv_rate}% rate`,a:'#00d4b4',f:v=>Math.round(v).toLocaleString()},
